@@ -1,0 +1,3 @@
+#define REDUCO_DIR_ENV "REDUCO_DIR"
+#define REDUCO_DIR_DEFAULT ".reduco"
+#define NAME_CHARS "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"

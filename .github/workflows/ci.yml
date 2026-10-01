@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} ${{ matrix.cc }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    steps:
+      - uses: actions/checkout@v4
+      - run: make CC=${{ matrix.cc }} CFLAGS_WARN="-Wall -Wextra -pedantic -Werror"
+      - run: ./reduco -v
+      - run: make test
+
+  freebsd:
+    name: freebsd cc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          run: |
+            make CFLAGS_WARN="-Wall -Wextra -pedantic -Werror"
+            ./reduco -v
+            make test
