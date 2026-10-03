@@ -6,17 +6,90 @@
 .Nd bring programs back after their world ended
 .Sh SYNOPSIS
 .Nm
+.Op Fl d Ar dir
+.Nm
+.Op Fl d Ar dir
+.Fl p Ar name
+.Nm
+.Op Fl d Ar dir
+.Fl x Ar name
+.Nm
 .Fl v
 .Sh DESCRIPTION
 .Nm
 remembers how a program was started, notices whether it ended on purpose
 or was killed together with its surroundings, and starts it again on request.
 It does not depend on the host it runs under.
+.Pp
+Without a mode option,
+.Nm
+lists the records of this host, one per line, sorted by name, with tab
+separated fields: state, name, info, working directory and command.
+The state is
+.Sq alive
+when a guard holds the lock of the record, with the guard's process ID as
+info, and
+.Sq dead
+otherwise, with the recorded cause of death as info, or
+.Sq -
+if there is none.
 .Sh OPTIONS
 .Bl -tag -width indent
+.It Fl d Ar dir
+Use
+.Ar dir
+as the record store.
+.It Fl p Ar name
+Print the record
+.Ar name
+as a
+.Xr sh 1
+command line that changes to the recorded directory and executes the recorded
+command.
+.It Fl x Ar name
+Delete the record
+.Ar name .
+A record that is alive is refused.
 .It Fl v
 Print version information to standard output and exit.
 .El
+.Sh ENVIRONMENT
+.Bl -tag -width indent
+.It Ev REDUCO_DIR
+Record store, used when
+.Fl d
+is not given.
+.It Ev HOME
+The record store defaults to
+.Pa $HOME/.reduco .
+.El
+.Sh FILES
+Each record is a directory
+.Pa name@host
+in the record store, where
+.Ar name
+consists of letters, digits,
+.Sq \&. ,
+.Sq _
+and
+.Sq -
+and does not start with
+.Sq \&. .
+.Bl -tag -width indent
+.It Pa argv
+The command, each argument terminated by a NUL byte.
+.It Pa cwd
+The working directory.
+.It Pa died
+The cause of death, if known.
+.It Pa lock
+Held with
+.Xr fcntl 2
+by the guard while the program runs.
+.El
+.Pp
+The record store is created with mode 0700 and refused if it is not owned by
+the caller or is writable by group or others.
 .Sh EXIT STATUS
 .Ex -std
 .Sh SEE ALSO
