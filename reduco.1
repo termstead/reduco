@@ -1,0 +1,24 @@
+.Dd October 1, 2026
+.Dt REDUCO 1
+.Os reduco VERSION
+.Sh NAME
+.Nm reduco
+.Nd bring programs back after their world ended
+.Sh SYNOPSIS
+.Nm
+.Fl v
+.Sh DESCRIPTION
+.Nm
+remembers how a program was started, notices whether it ended on purpose
+or was killed together with its surroundings, and starts it again on request.
+It does not depend on the host it runs under.
+.Sh OPTIONS
+.Bl -tag -width indent
+.It Fl v
+Print version information to standard output and exit.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr abduco 1 ,
+.Xr dvtm 1
