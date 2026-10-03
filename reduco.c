@@ -3,12 +3,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -24,6 +26,14 @@
 #define HOST_BUF 256
 
 enum { STATE_DEAD, STATE_ALIVE };
+enum { STAGE_CHDIR, STAGE_EXEC };
+
+struct failure {
+	int stage;
+	int err;
+};
+
+static volatile sig_atomic_t hit;
 
 struct record {
 	char *argbuf;
@@ -67,6 +77,7 @@ static void usage(void)
 {
 	fputs("usage: reduco [-d dir]\n"
 	      "       reduco [-d dir] -p name\n"
+	      "       reduco [-d dir] -r name\n"
 	      "       reduco [-d dir] -x name\n"
 	      "       reduco -v\n", stderr);
 	exit(EXIT_FAILURE);
@@ -520,10 +531,18 @@ fail:
 	return -1;
 }
 
+static void lock_busy(const char *name, int fd)
+{
+	pid_t pid = 0;
+
+	if (lock_state(fd, &pid) == 1)
+		die("%s: alive (pid %ld)", name, (long)pid);
+	die("%s: alive", name);
+}
+
 static void cmd_expunge(const char *dir, const char *name)
 {
 	char path[PATH_MAX];
-	pid_t pid = 0;
 	int fd, r;
 
 	record_require(dir, name);
@@ -534,11 +553,8 @@ static void cmd_expunge(const char *dir, const char *name)
 		r = lock_try(fd);
 		if (r == -1)
 			die("%s: lock:", name);
-		if (r == 1) {
-			if (lock_state(fd, &pid) == 1)
-				die("%s: alive (pid %ld)", name, (long)pid);
-			die("%s: alive", name);
-		}
+		if (r == 1)
+			lock_busy(name, fd);
 	}
 	record_path(path, sizeof(path), dir, name, NULL);
 	if (rmtree(path) == -1)
@@ -547,12 +563,274 @@ static void cmd_expunge(const char *dir, const char *name)
 		close(fd);
 }
 
+static void on_signal(int signo)
+{
+	hit = signo;
+}
+
+static const char *errname(int err)
+{
+	static const struct {
+		int err;
+		const char *name;
+	} names[] = {
+		{ E2BIG, "E2BIG" },
+		{ EACCES, "EACCES" },
+		{ ELOOP, "ELOOP" },
+		{ ENAMETOOLONG, "ENAMETOOLONG" },
+		{ ENOENT, "ENOENT" },
+		{ ENOEXEC, "ENOEXEC" },
+		{ ENOMEM, "ENOMEM" },
+		{ ENOTDIR, "ENOTDIR" },
+		{ EPERM, "EPERM" },
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+		if (names[i].err == err)
+			return names[i].name;
+	return strerror(err);
+}
+
+static const char *signame(int signo)
+{
+	switch (signo) {
+	case SIGHUP:
+		return "SIGHUP";
+	case SIGTERM:
+		return "SIGTERM";
+	default:
+		return "unknown";
+	}
+}
+
+static void signals_set(void (*handler)(int), void (*hup_term)(int))
+{
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sigemptyset(&sa.sa_mask);
+	sa.sa_handler = handler;
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGQUIT, &sa, NULL);
+	sa.sa_handler = hup_term;
+	sigaction(SIGHUP, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+}
+
+static void env_overlay(const char *dir, const char *name)
+{
+	char path[PATH_MAX], file[PATH_MAX];
+	struct dirent *e;
+	struct stat st;
+	DIR *d;
+	char *val;
+	size_t len;
+	int n;
+
+	record_path(path, sizeof(path), dir, name, "env");
+	d = opendir(path);
+	if (!d) {
+		if (errno != ENOENT)
+			warn("%s: env:", name);
+		return;
+	}
+	while ((e = readdir(d)) != NULL) {
+		if (e->d_name[0] == '.' || strchr(e->d_name, '='))
+			continue;
+		n = snprintf(file, sizeof(file), "%s/%s", path, e->d_name);
+		if (n < 0 || (size_t)n >= sizeof(file)) {
+			warn("%s: env/%s: path too long", name, e->d_name);
+			continue;
+		}
+		if (stat(file, &st) == -1 || !S_ISREG(st.st_mode))
+			continue;
+		val = read_file(file, &len);
+		if (!val) {
+			warn("%s: env/%s:", name, e->d_name);
+			continue;
+		}
+		if (setenv(e->d_name, val, 1) == -1)
+			die("setenv:");
+		free(val);
+	}
+	closedir(d);
+}
+
+static void child_run(const char *name, const struct record *rec, int fd)
+{
+	struct failure f;
+	const char *home;
+
+	signals_set(SIG_DFL, SIG_DFL);
+	if (chdir(rec->cwd) == -1) {
+		warn("%s: %s: %s; using $HOME", name, rec->cwd,
+		     strerror(errno));
+		home = getenv("HOME");
+		if (!home || chdir(home) == -1) {
+			f.stage = STAGE_CHDIR;
+			f.err = home ? errno : ENOENT;
+			goto fail;
+		}
+	}
+	execvp(rec->argv[0], rec->argv);
+	f.stage = STAGE_EXEC;
+	f.err = errno;
+fail:
+	if (write(fd, &f, sizeof(f)) == -1)
+		_exit(127);
+	_exit(f.err == ENOENT ? 127 : 126);
+}
+
+static int failure_read(int fd, struct failure *f)
+{
+	ssize_t n;
+
+	for (;;) {
+		n = read(fd, f, sizeof(*f));
+		if (n == -1 && errno == EINTR)
+			continue;
+		return n == (ssize_t)sizeof(*f);
+	}
+}
+
+static void died_write(const char *dir, const char *name, const char *cause)
+{
+	char path[PATH_MAX], line[64];
+	int fd, n;
+
+	record_path(path, sizeof(path), dir, name, "died");
+	n = snprintf(line, sizeof(line), "%s\n", cause);
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd == -1 || write(fd, line, (size_t)n) != n)
+		warn("%s: died:", name);
+	if (fd != -1)
+		close(fd);
+}
+
+static void propagate(int status)
+{
+	struct sigaction sa;
+	sigset_t set;
+	int sig;
+
+	if (!WIFSIGNALED(status))
+		exit(WEXITSTATUS(status));
+	sig = WTERMSIG(status);
+	memset(&sa, 0, sizeof(sa));
+	sigemptyset(&sa.sa_mask);
+	sa.sa_handler = SIG_DFL;
+	sigaction(sig, &sa, NULL);
+	sigemptyset(&set);
+	sigaddset(&set, sig);
+	sigprocmask(SIG_UNBLOCK, &set, NULL);
+	raise(sig);
+	exit(128 + sig);
+}
+
+static void record_abspath(char *out, size_t size, const char *path,
+                           const char *name)
+{
+	char cwd[PATH_MAX];
+	int n;
+
+	if (path[0] == '/') {
+		n = snprintf(out, size, "%s", path);
+	} else {
+		if (!getcwd(cwd, sizeof(cwd)))
+			die("getcwd:");
+		n = snprintf(out, size, "%s/%s", cwd, path);
+	}
+	if (n < 0 || (size_t)n >= size)
+		die("%s: path too long", name);
+}
+
+static void guard(const char *dir, const char *name, const struct record *rec)
+{
+	char path[PATH_MAX], real[PATH_MAX], buf[64], file[PATH_MAX];
+	struct failure f;
+	struct stat st;
+	int fds[2], status, failed;
+	pid_t pid;
+
+	record_path(path, sizeof(path), dir, name, NULL);
+	record_abspath(real, sizeof(real), path, name);
+	snprintf(buf, sizeof(buf), "%ld", (long)getpid());
+	if (setenv("REDUCO", real, 1) == -1 || setenv("REDUCO_PID", buf, 1) == -1)
+		die("setenv:");
+
+	if (pipe(fds) == -1)
+		die("pipe:");
+	fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+	fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+
+	signals_set(SIG_IGN, on_signal);
+	fflush(NULL);
+	pid = fork();
+	if (pid == -1)
+		die("fork:");
+	if (pid == 0) {
+		close(fds[0]);
+		child_run(name, rec, fds[1]);
+	}
+	close(fds[1]);
+	failed = failure_read(fds[0], &f);
+	close(fds[0]);
+
+	while (waitpid(pid, &status, 0) == -1) {
+		if (errno != EINTR)
+			die("waitpid:");
+	}
+
+	if (failed) {
+		snprintf(buf, sizeof(buf), "%s: %s",
+		         f.stage == STAGE_CHDIR ? "chdir" : "exec",
+		         errname(f.err));
+		died_write(dir, name, buf);
+		exit(f.stage == STAGE_EXEC && f.err == ENOENT ? 127 : 126);
+	}
+
+	record_path(file, sizeof(file), dir, name, "keep");
+	if (hit == 0 && stat(file, &st) == -1) {
+		if (rmtree(path) == -1)
+			warn("%s: remove:", name);
+	} else if (hit != 0) {
+		died_write(dir, name, signame(hit));
+	}
+	propagate(status);
+}
+
+static void cmd_revive(const char *dir, const char *name)
+{
+	struct record rec;
+	char path[PATH_MAX];
+	int fd, r;
+
+	record_require(dir, name);
+	record_path(path, sizeof(path), dir, name, "lock");
+	fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	if (fd == -1)
+		die("%s: lock:", name);
+	r = lock_try(fd);
+	if (r == -1)
+		die("%s: lock:", name);
+	if (r == 1)
+		lock_busy(name, fd);
+	if (record_load(dir, name, &rec) == -1)
+		exit(EXIT_FAILURE);
+	record_path(path, sizeof(path), dir, name, "died");
+	if (unlink(path) == -1 && errno != ENOENT)
+		warn("%s: died:", name);
+	env_overlay(dir, name);
+	guard(dir, name, &rec);
+}
+
 int main(int argc, char *argv[])
 {
 	const char *dirarg = NULL, *name = NULL, *dir;
 	int opt, mode = 'l';
 
-	while ((opt = getopt(argc, argv, "vd:p:x:")) != -1) {
+	while ((opt = getopt(argc, argv, "vd:p:r:x:")) != -1) {
 		switch (opt) {
 		case 'v':
 			version();
@@ -561,6 +839,7 @@ int main(int argc, char *argv[])
 			dirarg = optarg;
 			break;
 		case 'p':
+		case 'r':
 		case 'x':
 			if (mode != 'l')
 				usage();
@@ -582,6 +861,9 @@ int main(int argc, char *argv[])
 	switch (mode) {
 	case 'p':
 		cmd_print(dir, name);
+		break;
+	case 'r':
+		cmd_revive(dir, name);
 		break;
 	case 'x':
 		cmd_expunge(dir, name);

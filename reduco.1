@@ -12,6 +12,9 @@
 .Fl p Ar name
 .Nm
 .Op Fl d Ar dir
+.Fl r Ar name
+.Nm
+.Op Fl d Ar dir
 .Fl x Ar name
 .Nm
 .Fl v
@@ -46,6 +49,38 @@ as a
 .Xr sh 1
 command line that changes to the recorded directory and executes the recorded
 command.
+.It Fl r Ar name
+Revive the dead record
+.Ar name
+in the foreground.
+The lock of the record is taken first, so a record that is alive or being
+revived elsewhere is refused and reviving the same record twice at once starts
+the program once.
+The recorded command runs in the recorded directory, or in
+.Ev HOME
+with a warning if that directory is gone, with the files of the
+.Pa env
+directory set in its environment on top of the current one.
+.Nm
+stays as the parent of the program and guards it.
+If the program ends by itself, the record is removed.
+If
+.Nm
+receives
+.Dv SIGHUP
+or
+.Dv SIGTERM
+meanwhile, or the record has a
+.Pa keep
+file, the record is kept, and the signal is written to
+.Pa died .
+A kept record can be revived again.
+.Dv SIGINT
+and
+.Dv SIGQUIT
+are ignored by
+.Nm
+and not by the program.
 .It Fl x Ar name
 Delete the record
 .Ar name .
@@ -62,6 +97,16 @@ is not given.
 .It Ev HOME
 The record store defaults to
 .Pa $HOME/.reduco .
+.El
+.Pp
+The program started by
+.Fl r
+gets these variables:
+.Bl -tag -width indent
+.It Ev REDUCO
+The absolute path of its record.
+.It Ev REDUCO_PID
+The process ID of the guard.
 .El
 .Sh FILES
 Each record is a directory
@@ -82,6 +127,13 @@ The command, each argument terminated by a NUL byte.
 The working directory.
 .It Pa died
 The cause of death, if known.
+Removed when the record is revived.
+.It Pa env/
+Optional.
+One file per variable, whose bytes are the value.
+.It Pa keep
+Optional.
+If present, the record is kept when the program ends by itself.
 .It Pa lock
 Held with
 .Xr fcntl 2
@@ -92,6 +144,17 @@ The record store is created with mode 0700 and refused if it is not owned by
 the caller or is writable by group or others.
 .Sh EXIT STATUS
 .Ex -std
+.Pp
+With
+.Fl r ,
+the exit status is that of the program.
+If the program was killed by a signal,
+.Nm
+kills itself with the same signal.
+The status is 127 if the program was not found and 126 if it could not be
+executed or no working directory could be entered.
+The record is kept in these cases, with the reason in
+.Pa died .
 .Sh SEE ALSO
 .Xr abduco 1 ,
 .Xr dvtm 1
