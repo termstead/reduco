@@ -33,7 +33,7 @@ clean:
 
 dist: clean
 	mkdir -p reduco-$(VERSION)
-	cp LICENSE Makefile README.md config.def.h reduco.1 reduco.c testsuite.sh reduco-$(VERSION)
+	cp LICENSE Makefile README.md config.def.h reduco.1 reduco.c testlock.c testsuite.sh reduco-$(VERSION)
 	tar -cf - reduco-$(VERSION) | gzip -c > reduco-$(VERSION).tar.gz
 	rm -rf reduco-$(VERSION)
 
