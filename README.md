@@ -17,12 +17,13 @@ Configuration is done by copying `config.def.h` to `config.h` (done by
 
 ## Status
 
-Early development. Implemented so far: the record store (list, `-p`, `-x`).
-Creating, guarding and reviving records are not implemented yet.
+Early development. Implemented so far: the record store (list, `-p`, `-x`)
+and reviving records (`-r`). Creating records is not implemented yet.
 
 ```
 reduco [-d dir]            list records
 reduco [-d dir] -p name    print a record as a sh(1) command line
+reduco [-d dir] -r name    revive a dead record, guarded, in the foreground
 reduco [-d dir] -x name    delete a dead record
 reduco -v                  version
 ```
